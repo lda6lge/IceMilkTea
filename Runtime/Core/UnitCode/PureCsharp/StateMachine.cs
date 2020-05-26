@@ -17,9 +17,11 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.ExceptionServices;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace IceMilkTea.Core
 {
+    #region ステートマシン共通実装
     /// <summary>
     /// ステートマシンの更新処理中に発生した、未処理の例外をどう振る舞うかを表現した列挙型です
     /// </summary>
@@ -41,6 +43,7 @@ namespace IceMilkTea.Core
         /// </summary>
         CatchStateException,
     }
+    #endregion
 
 
 
@@ -885,6 +888,289 @@ namespace IceMilkTea.Core
             newState.transitionTable = new Dictionary<int, State>();
             return newState;
         }
+        #endregion
+    }
+    #endregion
+
+
+
+    #region タスクベースステートマシン実装
+    /// <summary>
+    /// タスク処理を実行する関数を状態制御として使用したステートマシンです
+    /// </summary>
+    public class ImtTaskStateMachine
+    {
+        // メンバ変数定義
+        private readonly Dictionary<StateFunc, Dictionary<int, StateFunc>> stateTable;
+        private SynchronizationContext synchronizationContext;
+        private CancellationTokenSource tokenSource;
+        private CancellationToken token;
+        private StateFunc currentState;
+        private StateFunc nextState;
+        private object argument;
+        private Task currentTask;
+
+
+
+        /// <summary>
+        /// ステートマシンが動作中かどうか
+        /// </summary>
+        public bool Running => currentState != null;
+
+
+
+        /// <summary>
+        /// ImtMiniTaskStateMachine クラスのインスタンスを初期化します
+        /// </summary>
+        public ImtTaskStateMachine()
+        {
+            // 状態関数テーブルとキャンセルソースやトークンの準備
+            stateTable = new Dictionary<StateFunc, Dictionary<int, StateFunc>>();
+            tokenSource = new CancellationTokenSource();
+            token = tokenSource.Token;
+
+
+            // Anyの遷移元を設定する
+            stateTable[InternalAnyStateFunc] = new Dictionary<int, StateFunc>();
+        }
+
+
+        #region 遷移設定関数
+        /// <summary>
+        /// 状態関数の任意遷移を追加します
+        /// </summary>
+        /// <param name="to">遷移先となる状態関数</param>
+        /// <param name="eventID">遷移イベントID</param>
+        /// <exception cref="InvalidOperationException">既にステートマシンが起動中です</exception>
+        /// <exception cref="ArgumentNullException">to が null です</exception>
+        public void AddAnyTransition(StateFunc to, int eventID)
+        {
+            // AnyStateがfromとして遷移の追加をする
+            AddTransition(InternalAnyStateFunc, to, eventID);
+        }
+
+
+        /// <summary>
+        /// 状態関数の遷移を追加します
+        /// </summary>
+        /// <param name="from">遷移元となる状態関数</param>
+        /// <param name="to">遷移先となる状態関数</param>
+        /// <param name="eventID">遷移イベントID</param>
+        /// <exception cref="InvalidOperationException">既にステートマシンが起動中です</exception>
+        /// <exception cref="ArgumentNullException">from または to が null です</exception>
+        public void AddTransition(StateFunc from, StateFunc to, int eventID)
+        {
+            // 例外判定を入れて遷移元状態関数から遷移テーブルを取得する
+            ThrowExceptionIfRunning();
+            if (!stateTable.TryGetValue(from ?? throw new ArgumentNullException(nameof(from)), out var transitionTable))
+            {
+                // 遷移テーブルがない場合は新規生成
+                transitionTable = new Dictionary<int, StateFunc>();
+                stateTable[from] = transitionTable;
+            }
+
+
+            // 遷移先の設定
+            transitionTable[eventID] = to ?? throw new ArgumentNullException(nameof(to));
+        }
+
+
+        /// <summary>
+        /// ステートマシンが最初に起動する状態関数を設定します
+        /// </summary>
+        /// <param name="state">最初に起動する状態関数</param>
+        /// <exception cref="InvalidOperationException">既にステートマシンが起動中です</exception>
+        /// <exception cref="ArgumentNullException">state が null です</exception>
+        public void SetStartState(StateFunc state)
+        {
+            // 例外判定を入れて次に実行するべき状態として設定
+            ThrowExceptionIfRunning();
+            nextState = state ?? throw new ArgumentNullException(nameof(state));
+        }
+        #endregion
+
+
+        #region ステートマシン制御機構
+        /// <summary>
+        /// ステートマシンが指定された状態かどうか確認をします
+        /// </summary>
+        /// <param name="state">確認したい状態の状態関数</param>
+        /// <returns>指定された状態であれば true を、異なる場合は false を返します</returns>
+        /// <exception cref="InvalidOperationException">ステートマシンはまだ起動していません</exception>
+        public bool IsCurrentState(StateFunc state)
+        {
+            // 例外判定を入れてから状態チェック
+            ThrowExceptionIfNotRunning();
+            return state == currentState;
+        }
+
+
+        /// <summary>
+        /// ステートマシンにイベントを送信して、ステート遷移の準備を行います。
+        /// </summary>
+        /// <param name="eventID">ステートマシンに送信するイベントID</param>
+        /// <returns>ステートマシンが送信されたイベントを受け付けた場合は true を、イベントを拒否または、イベントの受付ができない場合は false を返します</returns>
+        /// <exception cref="InvalidOperationException">ステートマシンはまだ起動していません</exception>
+        public bool SendEvent(int eventID)
+        {
+            return SendEvent(eventID, null);
+        }
+
+
+        /// <summary>
+        /// ステートマシンにイベントを送信して、ステート遷移の準備を行います。
+        /// </summary>
+        /// <param name="eventID"></param>
+        /// <param name="argument"></param>
+        /// <returns></returns>
+        /// <exception cref="InvalidOperationException">ステートマシンはまだ起動していません</exception>
+        public bool SendEvent(int eventID, object argument)
+        {
+            // 例外判定を入れる
+            ThrowExceptionIfNotRunning();
+            throw new NotImplementedException();
+        }
+        #endregion
+
+
+        #region ステートマシン更新機構
+        public void Update()
+        {
+            //if (currentState == null)
+            //{
+            //    currentState = nextState;
+            //    nextState = null;
+            //    currentTask = currentState(argument, token);
+            //}
+
+
+            //// Updateの起動スレッドIDを覚える
+            //LastUpdateThreadId = Thread.CurrentThread.ManagedThreadId;
+
+
+            //// まだ未起動なら
+            //if (!Running)
+            //{
+            //    // 次に処理するべきステート（つまり起動開始ステート）が未設定なら
+            //    if (nextState == null)
+            //    {
+            //        // 起動が出来ない例外を吐く
+            //        throw new InvalidOperationException("開始ステートが設定されていないため、ステートマシンの起動が出来ません");
+            //    }
+
+
+            //    // 現在処理中ステートとして設定する
+            //    currentState = nextState;
+            //    nextState = null;
+
+
+            //    try
+            //    {
+            //        // Enter処理中であることを設定してEnterを呼ぶ
+            //        updateState = UpdateState.Enter;
+            //        currentState.Enter();
+            //    }
+            //    catch (Exception exception)
+            //    {
+            //        // 起動時の復帰は現在のステートにnullが入っていないとまずいので遷移前の状態に戻す
+            //        nextState = currentState;
+            //        currentState = null;
+
+
+            //        // 更新状態をアイドリングにして、例外発生時のエラーハンドリングを行い終了する
+            //        updateState = UpdateState.Idle;
+            //        DoHandleException(exception);
+            //        return;
+            //    }
+
+
+            //    // 次に遷移するステートが無いなら
+            //    if (nextState == null)
+            //    {
+            //        // 起動処理は終わったので一旦終わる
+            //        updateState = UpdateState.Idle;
+            //        return;
+            //    }
+            //}
+
+
+            //try
+            //{
+            //    var awaiter = currentTask.GetAwaiter();
+            //    while (awaiter.IsCompleted)
+            //    {
+            //        awaiter.GetResult();
+            //        if (nextState != null)
+            //        {
+            //            currentState = nextState;
+            //            nextState = null;
+            //            currentTask = currentState(argument, token);
+            //            awaiter = currentTask.GetAwaiter();
+            //        }
+            //    }
+            //}
+            //catch (Exception exception)
+            //{
+            //    //TODO:Error handling...
+            //}
+        }
+        #endregion
+
+
+        #region 例外関数や内部定義用関数
+        /// <summary>
+        /// ステートマシンが未起動の場合は例外をスローします
+        /// </summary>
+        /// <exception cref="InvalidOperationException">ステートマシンはまだ起動していません</exception>
+        private void ThrowExceptionIfNotRunning()
+        {
+            // 起動していないなら
+            if (!Running)
+            {
+                // 起動中例外を吐く
+                throw new InvalidOperationException("ステートマシンはまだ起動していません");
+            }
+        }
+
+
+        /// <summary>
+        /// ステートマシンが起動済みの場合は例外をスローします
+        /// </summary>
+        /// <exception cref="InvalidOperationException">既にステートマシンが起動中です</exception>
+        private void ThrowExceptionIfRunning()
+        {
+            // 起動しているなら
+            if (Running)
+            {
+                // 起動中例外を吐く
+                throw new InvalidOperationException("既にステートマシンが起動中です");
+            }
+        }
+
+
+        /// <summary>
+        /// Any遷移する場合にAnyの遷移元として表現するための関数です
+        /// </summary>
+        /// <param name="argument">状態関数の引数</param>
+        /// <param name="token">キャンセル要求を受け取るトークン</param>
+        /// <returns>状態関数を処理しているタスクを返します</returns>
+        private Task InternalAnyStateFunc(object argument, CancellationToken token)
+        {
+            // 原則何もしないので直ちに完了を返す
+            return Task.CompletedTask;
+        }
+        #endregion
+
+
+
+        #region 内部型定義
+        /// <summary>
+        /// ステートマシンの状態そのものを表すデリゲート型です
+        /// </summary>
+        /// <param name="argument">状態に渡される引数</param>
+        /// <param name="token">状態の非同期をキャンセルされる場合のトークン</param>
+        /// <returns>状態処理中のタスクを返します</returns>
+        public delegate Task StateFunc(object argument, CancellationToken token);
         #endregion
     }
     #endregion
