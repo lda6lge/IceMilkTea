@@ -27,6 +27,7 @@ namespace IceMilkTeaEditor.Common
         // 定数定義
         private const string RootMenuName = "IceMilkTea";
         private const string RightClickRootMenuName = "Assets/IceMilkTea";
+        private const string DebugMenuName = RootMenuName + "/Debug";
         private const string WindowMenuName = RootMenuName + "/Window";
         private const string HierarchyMenuName = RootMenuName + "/Hierarchy";
 
@@ -73,6 +74,20 @@ namespace IceMilkTeaEditor.Common
         {
             // StateCollectorWindowsを開く
             StateCollectorWindow.OpenWindow();
+        }
+
+
+        [MenuItem(DebugMenuName + "/DumpPlayerLoopSystem")]
+        public static void OpenPlayerLoopSystemDumpWindow()
+        {
+            PlayerLoopSystemDumpWindow.OpenWindow();
+        }
+
+
+        [MenuItem(DebugMenuName + "/DumpSceneStack")]
+        public static void OpenSceneStackDumpWindow()
+        {
+            SceneStackDumpWindow.OpenWindow();
         }
 
 

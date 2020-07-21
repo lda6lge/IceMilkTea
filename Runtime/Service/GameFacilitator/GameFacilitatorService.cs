@@ -1,6 +1,6 @@
 ﻿// zlib/libpng License
 //
-// Copyright (c) 2018 - 2019 Sinoa
+// Copyright (c) 2018 Sinoa
 //
 // This software is provided 'as-is', without any express or implied warranty.
 // In no event will the authors be held liable for any damages arising from the use of this software.
@@ -76,11 +76,39 @@ namespace IceMilkTea.Service
 
 
 
+    #region インターフェイス定義
+    /// <summary>
+    /// GameFacilitatorService が実装するべきインターフェイスを定義しています
+    /// </summary>
+    public interface IGameFacilitatorService
+    {
+        int RunningSceneCount { get; }
+        GameScene RunningTopScene { get; }
+        int SceneCount { get; }
+
+        void ChangeScene(GameScene scene);
+        GameScene GetPreviousScene(GameScene scene);
+        int GetRunningSceneList(GameScene[] results);
+        GameScene[] GetSceneAll();
+        int GetSceneList(GameScene[] results, Func<GameFacilitatorService<GameScene>.SceneState, bool> match);
+        void RequestDropAllScene();
+        void RequestDropScene();
+        void RequestDropScene(GameScene scene);
+        void RequestNextScene(GameScene scene);
+        void RequestNextScene(GameScene scene, bool sleepTopRunningScene);
+        void RequestSleepScene(GameScene scene);
+        void RequestWakeUpScene(GameScene scene);
+        void SceneContextForEach(Action<GameScene, GameFacilitatorService<GameScene>.SceneState> action);
+    }
+    #endregion
+
+
+
     /// <summary>
     /// ゲーム進行を行うサービスクラスです。
     /// シーンという単位でゲーム進行管理を行い、シーンはまるでスタックのように管理します。
     /// </summary>
-    public class GameFacilitatorService<TSceneBase> : GameService where TSceneBase : GameScene
+    public class GameFacilitatorService<TSceneBase> : GameService, IGameFacilitatorService where TSceneBase : GameScene
     {
         #region シーン管理情報の型定義
         /// <summary>
@@ -426,12 +454,7 @@ namespace IceMilkTea.Service
         /// <exception cref="ArgumentNullException">scene が null です</exception>
         public void ChangeScene(TSceneBase scene)
         {
-            // もし scene が null なら
-            if (scene == null)
-            {
-                // 処理の続行が出来ない
-                throw new ArgumentNullException(nameof(scene));
-            }
+            ThrowIfArgumentNullException(scene, nameof(scene));
 
 
             // 破棄要求関数呼び出し後、シーン実行要求関数を呼ぶだけ
@@ -469,12 +492,7 @@ namespace IceMilkTea.Service
         /// <exception cref="ArgumentNullException">scene が null です</exception>
         public void RequestNextScene(TSceneBase scene, bool sleepTopRunningScene)
         {
-            // null を渡されたら
-            if (scene == null)
-            {
-                // nullの受付は許容しない
-                throw new ArgumentNullException(nameof(scene));
-            }
+            ThrowIfArgumentNullException(scene, nameof(scene));
 
 
             // もしトップシーンを寝かす指示が出ていて、かつシーンの数が空でないなら
@@ -588,6 +606,7 @@ namespace IceMilkTea.Service
                     continue;
                 }
 
+
                 // ステータスが Destroy系 なら
                 if (sceneContext.IsDestroy)
                 {
@@ -699,12 +718,7 @@ namespace IceMilkTea.Service
         /// <exception cref="InvalidOperationException">指定された scene は、管理対象になっていません</exception>
         public TSceneBase GetPreviousScene(TSceneBase scene)
         {
-            // nullを渡されてしまったら
-            if (scene == null)
-            {
-                // そのような確認は許されない！
-                throw new ArgumentNullException(nameof(scene));
-            }
+            ThrowIfArgumentNullException(scene, nameof(scene));
 
 
             // 管理情報の数分末尾から回る
@@ -714,7 +728,7 @@ namespace IceMilkTea.Service
                 if (sceneContextList[i].Scene == scene)
                 {
                     // さらにここから動作可能なシーンを割り出す
-                    for (i = i - 1; i >= 0; --i)
+                    for (i -= 1; i >= 0; --i)
                     {
                         // シーンの状態がまだ生きているなら
                         if (!sceneContextList[i].IsDestroy)
@@ -737,6 +751,36 @@ namespace IceMilkTea.Service
 
 
         /// <summary>
+        /// 現在のシーン管理状態の各要素を指定の処理で実行します
+        /// </summary>
+        /// <param name="action">シーン管理状態の要素に対して実行する関数</param>
+        public void SceneContextForEach(Action<TSceneBase, SceneState> action)
+        {
+            foreach (var sceneContext in sceneContextList)
+            {
+                action(sceneContext.Scene, sceneContext.State);
+            }
+        }
+
+
+        /// <summary>
+        /// 現在の管理されているシーンのすべてを取得します
+        /// </summary>
+        /// <returns>現在の管理下にあるシーンの全てを保持した配列を返します</returns>
+        public TSceneBase[] GetSceneAll()
+        {
+            var sceneArray = new TSceneBase[sceneContextList.Count];
+            for (int i = 0; i < sceneArray.Length; ++i)
+            {
+                sceneArray[i] = sceneContextList[i].Scene;
+            }
+
+
+            return sceneArray;
+        }
+
+
+        /// <summary>
         /// 指定されたシーン状態条件判定関数に一致するシーンを取得し、指定された結果配列に設定します。
         /// </summary>
         /// <param name="results">指定された条件に一致するシーンの結果を設定する配列、一致したシーンの数が配列の長さを超えても配列の長さまでしか格納しません</param>
@@ -746,20 +790,8 @@ namespace IceMilkTea.Service
         /// <exception cref="ArgumentNullException">match が null です</exception>
         public int GetSceneList(TSceneBase[] results, Func<SceneState, bool> match)
         {
-            // results に null を渡されてしまったら
-            if (results == null)
-            {
-                // どこに結果を納めればよいのだろうか
-                throw new ArgumentNullException(nameof(results));
-            }
-
-
-            // match に null を渡されてしまったら
-            if (match == null)
-            {
-                // どうやって判定すればよいのか
-                throw new ArgumentNullException(nameof(match));
-            }
+            ThrowIfArgumentNullException(results, nameof(results));
+            ThrowIfArgumentNullException(match, nameof(match));
 
 
             // もし結果格納バッファの長さが0なら
@@ -802,18 +834,11 @@ namespace IceMilkTea.Service
         /// <exception cref="ArgumentNullException">results が null です</exception>
         public int GetRunningSceneList(TSceneBase[] results)
         {
-            // results に null を渡されてしまったら
-            if (results == null)
-            {
-                // どこに結果を納めればよいのだろうか
-                throw new ArgumentNullException(nameof(results));
-            }
+            ThrowIfArgumentNullException(results, nameof(results));
 
 
-            // もし結果格納バッファの長さが0なら
             if (results.Length == 0)
             {
-                // そもそも回らず直ちに0を返す
                 return 0;
             }
 
@@ -839,6 +864,89 @@ namespace IceMilkTea.Service
 
             // 回りきったら現在の結果の数を返す
             return resultCount;
+        }
+        #endregion
+
+
+        #region 例外判定関数系
+        private void ThrowIfArgumentNullException(object argument, string name)
+        {
+            if (argument == null)
+            {
+                throw new ArgumentNullException(name);
+            }
+        }
+        #endregion
+
+
+        #region IGameFacilitatorService実装
+        GameScene IGameFacilitatorService.RunningTopScene => RunningTopScene;
+
+        void IGameFacilitatorService.ChangeScene(GameScene scene)
+        {
+            ChangeScene((TSceneBase)scene);
+        }
+
+        GameScene IGameFacilitatorService.GetPreviousScene(GameScene scene)
+        {
+            return GetPreviousScene((TSceneBase)scene);
+        }
+
+        int IGameFacilitatorService.GetRunningSceneList(GameScene[] results)
+        {
+            var genericResults = new TSceneBase[results.Length];
+            var result = GetRunningSceneList(genericResults);
+            for (int i = 0; i < results.Length; ++i)
+            {
+                results[i] = genericResults[i];
+            }
+            return result;
+        }
+
+        GameScene[] IGameFacilitatorService.GetSceneAll()
+        {
+            return Array.ConvertAll(GetSceneAll(), x => (GameScene)x);
+        }
+
+        int IGameFacilitatorService.GetSceneList(GameScene[] results, Func<GameFacilitatorService<GameScene>.SceneState, bool> match)
+        {
+            var genericResults = new TSceneBase[results.Length];
+            var result = GetSceneList(genericResults, x => match((GameFacilitatorService<GameScene>.SceneState)(int)x));
+            for (int i = 0; i < results.Length; ++i)
+            {
+                results[i] = genericResults[i];
+            }
+            return result;
+        }
+
+        void IGameFacilitatorService.RequestDropScene(GameScene scene)
+        {
+            RequestDropScene((TSceneBase)scene);
+        }
+
+        void IGameFacilitatorService.RequestNextScene(GameScene scene)
+        {
+            RequestNextScene((TSceneBase)scene);
+        }
+
+        void IGameFacilitatorService.RequestNextScene(GameScene scene, bool sleepTopRunningScene)
+        {
+            RequestNextScene((TSceneBase)scene, sleepTopRunningScene);
+        }
+
+        void IGameFacilitatorService.RequestSleepScene(GameScene scene)
+        {
+            RequestSleepScene((TSceneBase)scene);
+        }
+
+        void IGameFacilitatorService.RequestWakeUpScene(GameScene scene)
+        {
+            RequestWakeUpScene((TSceneBase)scene);
+        }
+
+        void IGameFacilitatorService.SceneContextForEach(Action<GameScene, GameFacilitatorService<GameScene>.SceneState> action)
+        {
+            SceneContextForEach((scene, state) => action(scene, (GameFacilitatorService<GameScene>.SceneState)(int)state));
         }
         #endregion
     }

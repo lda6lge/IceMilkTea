@@ -14,6 +14,7 @@
 // 3. This notice may not be removed or altered from any source distribution.
 
 using System;
+using System.Runtime.ExceptionServices;
 using UnityEngine;
 using UnityEngine.PlayerLoop;
 
@@ -26,18 +27,8 @@ namespace IceMilkTea.Core
     [HideCreateGameMainAssetMenu]
     public abstract class GameMain : ScriptableObject
     {
-        #region PlayerLoopSystem用型定義
-        /// <summary>
-        /// ゲームサービスマネージャのサービス起動ルーチンを実行する型です
-        /// </summary>
-        public struct GameServiceManagerStartup { }
-
-
-        /// <summary>
-        /// ゲームサービスマネージャのサービス終了ルーチンを実行する型です
-        /// </summary>
-        public struct GameServiceManagerCleanup { }
-        #endregion
+        private Action messagePumpHandler;
+        private UnityLoggerProxyLogHandler proxyLogHandler;
 
 
 
@@ -78,23 +69,11 @@ namespace IceMilkTea.Core
 
 
             // サービスマネージャのインスタンスを生成するが、nullが返却されるようなことがあれば
-            Current.ServiceManager = Current.CreateGameServiceManager();
-            if (Current.ServiceManager == null)
-            {
-                // ゲームシステムは破壊的な死亡をした
-                throw new InvalidOperationException("GameServiceManager の正しいインスタンスが生成されませんでした。");
-            }
-
-
-            // ハンドラの登録をする
+            Current.ServiceManager = new GameServiceManager();
+            InstallSynchronizationContext();
+            Current.InstallProxyLogHandler();
             RegisterHandler();
-
-
-            // サービスマネージャを起動する
             Current.ServiceManager.Startup();
-
-
-            // ゲームの起動を開始する
             Current.Startup();
         }
 
@@ -118,8 +97,9 @@ namespace IceMilkTea.Core
 
             // 渡されたゲームメインを設定して初期化を実行する
             Current = gameMain;
-            Current.ServiceManager = Current.CreateGameServiceManager();
+            Current.ServiceManager = new GameServiceManager();
             RegisterHandler();
+            Current.UninstallProxyLogHandler();
             Current.ServiceManager.Startup();
             Current.Startup();
         }
@@ -130,15 +110,9 @@ namespace IceMilkTea.Core
         /// </summary>
         private static void InternalShutdown()
         {
-            // ハンドラの解除をする
             UnregisterHandler();
-
-
-            // サービスマネージャを停止する
+            UninstallSynchronizationContext();
             Current.ServiceManager.Shutdown();
-
-
-            // ゲームのシャットダウンをする
             Current.Shutdown();
         }
 
@@ -176,6 +150,31 @@ namespace IceMilkTea.Core
         }
 
 
+        private static void InstallSynchronizationContext()
+        {
+            ImtSynchronizationContext.Install(out Current.messagePumpHandler);
+        }
+
+
+        private static void UninstallSynchronizationContext()
+        {
+            ImtSynchronizationContext.Uninstall();
+        }
+
+
+        private void InstallProxyLogHandler()
+        {
+            proxyLogHandler = new UnityLoggerProxyLogHandler();
+        }
+
+
+        private void UninstallProxyLogHandler()
+        {
+            proxyLogHandler.Dispose();
+            proxyLogHandler = null;
+        }
+
+
         /// <summary>
         /// GameMainの動作に必要なハンドラの登録処理を行います
         /// </summary>
@@ -185,15 +184,9 @@ namespace IceMilkTea.Core
             Application.quitting += InternalShutdown;
 
 
-            // サービスマネージャの開始と終了のループシステムを生成
-            var startupGameServiceLoopSystem = new ImtPlayerLoopSystem(typeof(GameServiceManagerStartup), Current.ServiceManager.StartupServices);
-            var cleanupGameServiceLoopSystem = new ImtPlayerLoopSystem(typeof(GameServiceManagerCleanup), Current.ServiceManager.CleanupServices);
-
-
-            // ゲームループの開始と終了のタイミングあたりにサービスマネージャのスタートアップとクリーンアップの処理を引っ掛ける
+            var mainUpdate = new ImtPlayerLoopSystem(typeof(GameMain), Current.Update);
             var loopSystem = ImtPlayerLoopSystem.GetCurrentPlayerLoop();
-            loopSystem.Insert<Initialization.PlayerUpdateTime>(InsertTiming.AfterInsert, startupGameServiceLoopSystem);
-            loopSystem.Insert<PostLateUpdate.ExecuteGameCenterCallbacks>(InsertTiming.AfterInsert, cleanupGameServiceLoopSystem);
+            loopSystem.Insert<Initialization.PlayerUpdateTime>(InsertTiming.AfterInsert, mainUpdate);
             loopSystem.BuildAndSetUnityPlayerLoop();
         }
 
@@ -206,6 +199,13 @@ namespace IceMilkTea.Core
             // アプリケーション終了イベントを外す
             // （PlayerLoopSystemはPlayerLoopSystem自身が登録解除まで担保してくれているのでそのまま）
             Application.quitting -= InternalShutdown;
+        }
+
+
+
+        private void Update()
+        {
+            messagePumpHandler();
         }
         #endregion
 
@@ -255,15 +255,15 @@ namespace IceMilkTea.Core
 
 
         /// <summary>
-        /// ゲームサービスを管理する、サービスマネージャを生成します。
-        /// ゲームサービスの管理をカスタマイズする場合は、
-        /// この関数をオーバーライドしてGameServiceManagerを継承したクラスのインスタンスを返します。
+        /// IceMilkTea のシステム内で発生した未処理の例外を処理します。
         /// </summary>
-        /// <returns>GameServiceManager のインスタンスを返します</returns>
-        protected virtual GameServiceManager CreateGameServiceManager()
+        /// <param name="exceptionArgs">発生した未処理の例外</param>
+        internal protected virtual void UnhandledException(ImtUnhandledExceptionArgs exceptionArgs)
         {
-            // 通常は、素のゲームサービスマネージャを生成して返す
-            return new GameServiceManager();
+            if (exceptionArgs.Source != ImtUnhandledExceptionSource.UnityLogging)
+            {
+                exceptionArgs.Throw();
+            }
         }
         #endregion
 
@@ -288,5 +288,131 @@ namespace IceMilkTea.Core
             }
         }
         #endregion
+
+
+
+        #region UnityLoggerProxyクラス実装
+        private class UnityLoggerProxyLogHandler : ILogHandler, IDisposable
+        {
+            private bool disposed;
+            private readonly ILogHandler unityDefaultLogHandler;
+
+
+
+            public UnityLoggerProxyLogHandler()
+            {
+                unityDefaultLogHandler = Debug.unityLogger.logHandler;
+                Debug.unityLogger.logHandler = this;
+            }
+
+
+            ~UnityLoggerProxyLogHandler()
+            {
+                Dispose(false);
+            }
+
+
+            public void Dispose()
+            {
+                Dispose(true);
+                GC.SuppressFinalize(this);
+            }
+
+            protected virtual void Dispose(bool disposing)
+            {
+                if (disposed)
+                {
+                    return;
+                }
+
+
+                if (Debug.unityLogger.logHandler is UnityLoggerProxyLogHandler)
+                {
+                    Debug.unityLogger.logHandler = unityDefaultLogHandler;
+                }
+
+
+                disposed = true;
+            }
+
+
+            public void LogException(Exception exception, UnityEngine.Object context)
+            {
+                Current?.UnhandledException(new ImtUnhandledExceptionArgs(exception, ImtUnhandledExceptionSource.UnityLogging, context));
+            }
+
+            public void LogFormat(LogType logType, UnityEngine.Object context, string format, params object[] args)
+            {
+                unityDefaultLogHandler.LogFormat(logType, context, format, args);
+            }
+        }
+        #endregion
+    }
+
+
+
+    /// <summary>
+    /// IceMilkTea のシステム内で発生した未処理の例外をデータとして提供します
+    /// </summary>
+    public class ImtUnhandledExceptionArgs
+    {
+        // メンバ変数定義
+        private readonly ExceptionDispatchInfo dispatchInfo;
+
+
+
+        /// <summary>
+        /// 発生した例外の内容
+        /// </summary>
+        public Exception Exception { get; }
+
+
+        public ImtUnhandledExceptionSource Source { get; }
+
+
+        public object SourceObject { get; }
+
+
+
+        /// <summary>
+        /// ImtUnhandledExceptionArgs クラスのインスタンスを初期化します
+        /// </summary>
+        /// <param name="exception">発生した例外</param>
+        public ImtUnhandledExceptionArgs(Exception exception) : this(exception, ImtUnhandledExceptionSource.Unknown, null)
+        {
+        }
+
+
+        public ImtUnhandledExceptionArgs(Exception exception, ImtUnhandledExceptionSource source) : this(exception, source, null)
+        {
+        }
+
+
+        public ImtUnhandledExceptionArgs(Exception exception, ImtUnhandledExceptionSource source, object sourceObject)
+        {
+            dispatchInfo = ExceptionDispatchInfo.Capture(exception);
+            Exception = exception;
+            Source = source;
+            SourceObject = sourceObject;
+        }
+
+
+        /// <summary>
+        /// キャプチャ未処理の例外をスローします
+        /// </summary>
+        public void Throw()
+        {
+            dispatchInfo.Throw();
+        }
+    }
+
+
+
+    public enum ImtUnhandledExceptionSource
+    {
+        Unknown,
+        IceMilkTeaService,
+        SynchronizationContext,
+        UnityLogging,
     }
 }
